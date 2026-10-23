@@ -1,0 +1,5 @@
+.DS_Store
+MusicBar.app/
+*.zip
+*.zip.sha256
+*.dSYM/
