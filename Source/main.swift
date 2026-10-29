@@ -293,9 +293,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if let result { self.playback = result }
             self.lastError = error
-            self.inputActive = self.autoPauseEnabled ? AudioInputMonitor.isActive() : nil
+            let activeInputs = self.autoPauseEnabled ? AudioInputMonitor.activeInputs() : nil
+            self.inputActive = activeInputs.map { !$0.isEmpty }
             let shouldPause = result != nil && self.inputPauseRule.shouldPause(
-                inputActive: self.inputActive, enabled: self.autoPauseEnabled, playing: self.playback.playing
+                activeInputs: activeInputs, enabled: self.autoPauseEnabled, playing: self.playback.playing
             )
             self.render()
             if shouldPause { self.refresh(command: "if player state is playing then pause") }
@@ -334,19 +335,21 @@ if CommandLine.arguments.contains("--self-test") {
     assert(Playback(position: 10, duration: 0).progress == 0)
     assert(Playback(state: "playing").playing)
     var rule = InputPauseRule()
-    assert(!rule.shouldPause(inputActive: false, enabled: true, playing: true))
-    assert(rule.shouldPause(inputActive: true, enabled: true, playing: true))
-    assert(!rule.shouldPause(inputActive: true, enabled: true, playing: true))
-    assert(!rule.shouldPause(inputActive: nil, enabled: true, playing: true))
-    assert(!rule.shouldPause(inputActive: true, enabled: true, playing: true))
-    assert(!rule.shouldPause(inputActive: false, enabled: true, playing: false))
-    assert(rule.shouldPause(inputActive: true, enabled: true, playing: true))
-    assert(!rule.shouldPause(inputActive: true, enabled: false, playing: true))
-    assert(rule.shouldPause(inputActive: true, enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: [], enabled: true, playing: true))
+    assert(rule.shouldPause(activeInputs: [1], enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: [1], enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: nil, enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: [1], enabled: true, playing: true))
+    assert(rule.shouldPause(activeInputs: [1, 2], enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: [2], enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: [], enabled: true, playing: false))
+    assert(rule.shouldPause(activeInputs: [1], enabled: true, playing: true))
+    assert(!rule.shouldPause(activeInputs: [1], enabled: false, playing: true))
+    assert(rule.shouldPause(activeInputs: [1], enabled: true, playing: true))
     var pausedRule = InputPauseRule()
-    assert(!pausedRule.shouldPause(inputActive: true, enabled: true, playing: false))
-    assert(!pausedRule.shouldPause(inputActive: true, enabled: true, playing: true))
-    print("MusicBar: 19 self-checks passed")
+    assert(!pausedRule.shouldPause(activeInputs: [1], enabled: true, playing: false))
+    assert(!pausedRule.shouldPause(activeInputs: [1], enabled: true, playing: true))
+    print("MusicBar: 21 self-checks passed")
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate()

@@ -8,7 +8,7 @@ enum AudioInputMonitor {
     }
 
     // Read activity flags only; never open an input device or capture audio.
-    static func isActive() -> Bool? {
+    static func activeInputs() -> Set<AudioObjectID>? {
         guard #available(macOS 14.2, *) else { return nil }
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
@@ -20,7 +20,7 @@ enum AudioInputMonitor {
         guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == noErr else { return nil }
         let stride = MemoryLayout<AudioObjectID>.stride
         guard Int(size) % stride == 0 else { return nil }
-        if size == 0 { return false }
+        if size == 0 { return [] }
         var processes = [AudioObjectID](repeating: 0, count: Int(size) / stride)
         let result = processes.withUnsafeMutableBytes {
             AudioObjectGetPropertyData(system, &address, 0, nil, &size, $0.baseAddress!)
@@ -28,6 +28,7 @@ enum AudioInputMonitor {
         guard result == noErr, Int(size) <= processes.count * stride else { return nil }
         address.mSelector = kAudioProcessPropertyIsRunningInput
         var failed = false
+        var activeInputs = Set<AudioObjectID>()
         for process in processes.prefix(Int(size) / stride) {
             var active: UInt32 = 0
             var valueSize = UInt32(MemoryLayout<UInt32>.size)
@@ -44,25 +45,25 @@ enum AudioInputMonitor {
                 if AudioObjectGetPropertyDataSize(process, &devices, 0, nil, &deviceSize) != noErr {
                     failed = true
                 } else if deviceSize > 0 {
-                    return true
+                    activeInputs.insert(process)
                 }
             }
         }
-        return failed ? nil : false
+        return failed ? nil : activeInputs
     }
 }
 
 struct InputPauseRule {
-    private(set) var wasActive = false
+    private var previousInputs = Set<AudioObjectID>()
 
-    mutating func shouldPause(inputActive: Bool?, enabled: Bool, playing: Bool) -> Bool {
+    mutating func shouldPause(activeInputs: Set<AudioObjectID>?, enabled: Bool, playing: Bool) -> Bool {
         guard enabled else {
-            wasActive = false
+            previousInputs = []
             return false
         }
-        guard let inputActive else { return false }
-        defer { wasActive = inputActive }
+        guard let activeInputs else { return false }
+        defer { previousInputs = activeInputs }
         // Only the start of input activity triggers a pause; manual playback stays available.
-        return inputActive && !wasActive && playing
+        return !activeInputs.subtracting(previousInputs).isEmpty && playing
     }
 }
