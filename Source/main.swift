@@ -99,6 +99,8 @@ final class MusicBridge {
 }
 
 final class PlayerView: NSViewController {
+    let heading = NSTextField(labelWithString: "APPLE MUSIC")
+    let autoPause = NSButton(checkboxWithTitle: "自动暂停", target: nil, action: nil)
     let song = NSTextField(labelWithString: "正在连接 Apple Music…")
     let artist = NSTextField(labelWithString: "")
     let progress = NSProgressIndicator()
@@ -112,12 +114,23 @@ final class PlayerView: NSViewController {
     var onCommand: ((String) -> Void)?
     var onOpen: (() -> Void)?
     var onRetry: (() -> Void)?
+    var onAutoPauseChanged: ((Bool) -> Void)?
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 176))
-        let heading = NSTextField(labelWithString: "APPLE MUSIC")
         heading.font = .systemFont(ofSize: 10, weight: .semibold)
         heading.textColor = .secondaryLabelColor
+        autoPause.font = .systemFont(ofSize: 10)
+        autoPause.controlSize = .mini
+        autoPause.target = self
+        autoPause.action = #selector(changeAutoPause)
+        autoPause.isEnabled = AudioInputMonitor.isSupported
+        autoPause.toolTip = AudioInputMonitor.isSupported
+            ? "任何应用开始使用麦克风时暂停音乐，录音和语音通话也会触发；停止后需手动恢复播放。"
+            : "自动暂停需要 macOS 14.2 或更高版本。"
+        let headingRow = NSStackView(views: [heading, NSView(), autoPause])
+        headingRow.orientation = .horizontal
+        headingRow.distribution = .fill
         song.font = .systemFont(ofSize: 17, weight: .bold)
         song.lineBreakMode = .byTruncatingTail
         artist.font = .systemFont(ofSize: 12)
@@ -162,7 +175,7 @@ final class PlayerView: NSViewController {
         }
         let footer = NSStackView(views: [open, retry, NSView(), quit])
         footer.orientation = .horizontal
-        let stack = NSStackView(views: [heading, titleRow, artist, progress, times, errorLabel, footer])
+        let stack = NSStackView(views: [headingRow, titleRow, artist, progress, times, errorLabel, footer])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 6
@@ -174,7 +187,7 @@ final class PlayerView: NSViewController {
             stack.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
             stack.bottomAnchor.constraint(lessThanOrEqualTo: view.bottomAnchor, constant: -14)
         ])
-        for item in [titleRow, artist, progress, times, errorLabel, footer] {
+        for item in [headingRow, titleRow, artist, progress, times, errorLabel, footer] {
             item.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true
         }
     }
@@ -191,8 +204,11 @@ final class PlayerView: NSViewController {
         button.heightAnchor.constraint(equalToConstant: 28).isActive = true
     }
 
-    func update(_ playback: Playback, error: String?) {
+    func update(_ playback: Playback, error: String?, autoPauseEnabled: Bool, inputActive: Bool?) {
         _ = view
+        autoPause.state = autoPauseEnabled ? .on : .off
+        heading.stringValue = autoPauseEnabled && inputActive == true ? "麦克风使用中" : "APPLE MUSIC"
+        heading.toolTip = autoPauseEnabled && inputActive == nil ? "暂时无法读取麦克风使用状态" : nil
         song.stringValue = playback.title
         song.toolTip = playback.title
         artist.stringValue = playback.artist
@@ -216,6 +232,7 @@ final class PlayerView: NSViewController {
     @objc private func nextTrack() { onCommand?("next track") }
     @objc private func openMusic() { onOpen?() }
     @objc private func retryRead() { onRetry?() }
+    @objc private func changeAutoPause() { onAutoPauseChanged?(autoPause.state == .on) }
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
@@ -226,8 +243,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var playback = Playback()
     private var timer: Timer?
     private var lastError: String?
+    private var inputActive: Bool?
+    private var inputPauseRule = InputPauseRule()
+    private var autoPauseEnabled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.register(defaults: ["autoPauseForInput": true])
+        autoPauseEnabled = AudioInputMonitor.isSupported && UserDefaults.standard.bool(forKey: "autoPauseForInput")
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.target = self
         item.button?.action = #selector(showPlayer)
@@ -238,6 +260,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 300, height: 176)
         player.onCommand = { [weak self] in self?.refresh(command: $0) }
         player.onRetry = { [weak self] in self?.refresh() }
+        player.onAutoPauseChanged = { [weak self] enabled in
+            guard let self else { return }
+            self.autoPauseEnabled = enabled
+            self.inputPauseRule = InputPauseRule()
+            UserDefaults.standard.set(enabled, forKey: "autoPauseForInput")
+            self.render()
+            self.refresh()
+        }
         player.onOpen = {
             NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: "/System/Applications/Music.app"), configuration: .init())
         }
@@ -263,7 +293,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self else { return }
             if let result { self.playback = result }
             self.lastError = error
+            self.inputActive = self.autoPauseEnabled ? AudioInputMonitor.isActive() : nil
+            let shouldPause = result != nil && self.inputPauseRule.shouldPause(
+                inputActive: self.inputActive, enabled: self.autoPauseEnabled, playing: self.playback.playing
+            )
             self.render()
+            if shouldPause { self.refresh(command: "if player state is playing then pause") }
+            if error != nil { self.inputPauseRule = InputPauseRule() }
         }
     }
 
@@ -275,7 +311,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let name = playback.hasTrack ? playback.title : "音乐"
         item.button?.title = " " + String(name.prefix(18)) + (name.count > 18 ? "…" : "")
         item.button?.toolTip = lastError ?? "\(playback.title) — \(playback.artist)"
-        player.update(playback, error: lastError)
+        player.update(playback, error: lastError, autoPauseEnabled: autoPauseEnabled, inputActive: inputActive)
         popover.contentSize = NSSize(width: 300, height: lastError == nil ? 176 : 236)
     }
 
@@ -297,7 +333,20 @@ if CommandLine.arguments.contains("--self-test") {
     assert(Playback(position: -10, duration: 100).progress == 0)
     assert(Playback(position: 10, duration: 0).progress == 0)
     assert(Playback(state: "playing").playing)
-    print("MusicBar: 8 self-checks passed")
+    var rule = InputPauseRule()
+    assert(!rule.shouldPause(inputActive: false, enabled: true, playing: true))
+    assert(rule.shouldPause(inputActive: true, enabled: true, playing: true))
+    assert(!rule.shouldPause(inputActive: true, enabled: true, playing: true))
+    assert(!rule.shouldPause(inputActive: nil, enabled: true, playing: true))
+    assert(!rule.shouldPause(inputActive: true, enabled: true, playing: true))
+    assert(!rule.shouldPause(inputActive: false, enabled: true, playing: false))
+    assert(rule.shouldPause(inputActive: true, enabled: true, playing: true))
+    assert(!rule.shouldPause(inputActive: true, enabled: false, playing: true))
+    assert(rule.shouldPause(inputActive: true, enabled: true, playing: true))
+    var pausedRule = InputPauseRule()
+    assert(!pausedRule.shouldPause(inputActive: true, enabled: true, playing: false))
+    assert(!pausedRule.shouldPause(inputActive: true, enabled: true, playing: true))
+    print("MusicBar: 19 self-checks passed")
 } else {
     let app = NSApplication.shared
     let delegate = AppDelegate()
